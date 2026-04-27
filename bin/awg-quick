@@ -114,6 +114,9 @@ del_if() {
 			cmd ip -6 rule delete table main suppress_prefixlength 0
 		done
 	fi
+	# vpn-deck:patch:begin endpoint-direct-route
+	del_endpoint_direct_route || true
+	# vpn-deck:patch:end endpoint-direct-route
 	cmd ip link delete dev "$INTERFACE"
 }
 
@@ -242,6 +245,61 @@ set_config() {
 	cmd awg setconf "$INTERFACE" <(echo "$WG_CONFIG")
 }
 
+# vpn-deck:patch:begin endpoint-direct-route
+# Adds /32 (or /128) host routes to peer endpoints via the path the kernel
+# would currently use to reach them — *before* the tunnel hijacks routing.
+# Prevents the "tunnel routes its own underlay" loop that occurs when a
+# split-tunnel AllowedIPs CIDR includes the endpoint's IP. Harmless with
+# AllowedIPs=0.0.0.0/0 (more specific than the suppressed default route).
+ENDPOINT_ROUTE_STATE_DIR="/var/run/awg-quick"
+
+_endpoint_route_state_file() {
+	echo "$ENDPOINT_ROUTE_STATE_DIR/${INTERFACE}.endpoint-routes"
+}
+
+set_endpoint_direct_route() {
+	local endpoint host proto mask route_info gw dev state_file
+	state_file="$(_endpoint_route_state_file)"
+	mkdir -p "$ENDPOINT_ROUTE_STATE_DIR" 2>/dev/null || return 0
+	: > "$state_file" 2>/dev/null || return 0
+	while read -r _ endpoint; do
+		[[ $endpoint =~ ^\[?([a-z0-9:.]+)\]?:[0-9]+$ ]] || continue
+		host="${BASH_REMATCH[1]}"
+		if [[ $host == *:* ]]; then
+			proto=-6; mask=128
+		else
+			proto=-4; mask=32
+		fi
+		route_info="$(ip $proto route get "$host" 2>/dev/null | head -n1)"
+		[[ -n $route_info ]] || continue
+		# No "via" means on-link route (LAN endpoint) — nothing to bypass.
+		[[ $route_info =~ via\ ([^ ]+) ]] || continue
+		gw="${BASH_REMATCH[1]}"
+		[[ $route_info =~ dev\ ([^ ]+) ]] || continue
+		dev="${BASH_REMATCH[1]}"
+		# Don't route the endpoint via the tunnel itself.
+		[[ $dev != "$INTERFACE" ]] || continue
+		# Tolerate failure: a missing endpoint-route is preferable to a
+		# fully aborted tunnel start (cleanup of partial state still runs).
+		if cmd ip $proto route replace "$host/$mask" via "$gw" dev "$dev"; then
+			echo "$proto $host/$mask" >> "$state_file"
+		fi
+	done < <(awg show "$INTERFACE" endpoints 2>/dev/null)
+	[[ -s $state_file ]] || rm -f "$state_file"
+}
+
+del_endpoint_direct_route() {
+	local proto cidr state_file
+	state_file="$(_endpoint_route_state_file)"
+	[[ -f $state_file ]] || return 0
+	while read -r proto cidr; do
+		[[ -n $proto && -n $cidr ]] || continue
+		cmd ip $proto route del "$cidr" 2>/dev/null || true
+	done < "$state_file"
+	rm -f "$state_file"
+}
+# vpn-deck:patch:end endpoint-direct-route
+
 save_config() {
 	local old_umask new_config current_config address cmd
 	[[ $(ip -all -brief address show dev "$INTERFACE") =~ ^$INTERFACE\ +\ [A-Z]+\ +(.+)$ ]] || true
@@ -326,6 +384,11 @@ cmd_up() {
 	done
 	set_mtu_up
 	set_dns
+	# vpn-deck:patch:begin endpoint-direct-route
+	# Must run *before* add_route so the kernel still sees the original
+	# (pre-tunnel) path to each peer endpoint via `ip route get`.
+	set_endpoint_direct_route
+	# vpn-deck:patch:end endpoint-direct-route
 	for i in $(while read -r _ i; do for i in $i; do [[ $i =~ ^[0-9a-z:.]+/[0-9]+$ ]] && echo "$i"; done; done < <(awg show "$INTERFACE" allowed-ips) | sort -nr -k 2 -t /); do
 		add_route "$i"
 	done
