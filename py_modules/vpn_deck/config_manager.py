@@ -2,11 +2,14 @@
 ConfigManager - Manages VPN configurations with import and validation
 """
 
+import json
 import os
 import re
 from typing import Optional, Dict, List
 
 import decky
+
+from .singbox import protocol_label
 
 
 class ConfigManager:
@@ -65,6 +68,27 @@ class ConfigManager:
     def get_interface_name(self, name: str) -> str:
         return f"{self.config_prefix}{self._sanitize_name(name)}"
 
+    _EXTENSIONS = {"awg": "conf", "sing-box": "json", "vless": "vless"}
+
+    def config_type(self, name: str) -> Optional[str]:
+        """"awg" for a .conf, "sing-box" for a .json, "vless" for a stored vless:// link, None if absent."""
+        base = os.path.join(self.config_dir, self._sanitize_name(name))
+        for kind, ext in self._EXTENSIONS.items():
+            if os.path.isfile(f"{base}.{ext}"):
+                return kind
+        return None
+
+    def config_path(self, name: str) -> str:
+        ext = self._EXTENSIONS.get(self.config_type(name), "conf")
+        return os.path.join(self.config_dir, f"{self._sanitize_name(name)}.{ext}")
+
+    def _singbox_protocol(self, path: str) -> str:
+        try:
+            with open(path) as f:
+                return protocol_label(json.load(f)) or "sing-box"
+        except (OSError, ValueError, RecursionError):
+            return "sing-box"
+
     async def scan_existing_configs(self) -> Dict[str, List[Dict]]:
         """
         Scans for all VPN configurations (managed and user-created).
@@ -97,7 +121,23 @@ class ConfigManager:
                             "path": local_path,
                             "system_path": system_path,
                             "is_symlink": is_symlink,
-                            "managed_by": "vpn-deck"
+                            "managed_by": "vpn-deck",
+                            "type": "awg",
+                            "protocol": "AWG",
+                        })
+                    elif filename.endswith(('.json', '.vless')):
+                        name, ext = os.path.splitext(filename)
+                        local_path = os.path.join(self.config_dir, filename)
+                        vless = ext == '.vless'
+                        result["managed"].append({
+                            "name": name,
+                            "interface": f"{self.config_prefix}{name}",
+                            "path": local_path,
+                            "system_path": None,
+                            "is_symlink": False,
+                            "managed_by": "vpn-deck",
+                            "type": "vless" if vless else "sing-box",
+                            "protocol": "VLESS" if vless else self._singbox_protocol(local_path),
                         })
             
             # Scan existing configs in system directory
@@ -135,9 +175,8 @@ class ConfigManager:
     
     async def get_config_content(self, name: str) -> Optional[str]:
         """Reads and returns the content of a configuration file"""
-        sanitized_name = self._sanitize_name(name)
-        config_path = os.path.join(self.config_dir, f"{sanitized_name}.conf")
-        
+        config_path = self.config_path(name)
+
         try:
             if not os.path.isfile(config_path):
                 decky.logger.warning(f"Config file not found: {config_path}")
@@ -200,11 +239,36 @@ class ConfigManager:
 
         return {"success": True, "config_name": sanitized_name, "interface_name": interface_name, "error": None}
 
+    def _write_singbox_file(self, name: str, ext: str, text: str) -> Dict:
+        """sing-box configs live only in the local store, no symlink; a .json and a .vless never coexist."""
+        sanitized_name = self._sanitize_name(name)
+        local_path = os.path.join(self.config_dir, f"{sanitized_name}.{ext}")
+        tmp_path = f"{local_path}.tmp"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp_path, local_path)
+        other = os.path.join(self.config_dir, f"{sanitized_name}.{'json' if ext == 'vless' else 'vless'}")
+        if os.path.exists(other):
+            os.unlink(other)
+        decky.logger.info(f"Wrote sing-box config to {local_path}")
+        return {"success": True, "config_name": sanitized_name,
+                "interface_name": f"{self.config_prefix}{sanitized_name}", "error": None}
+
+    def write_singbox_config(self, name: str, config: dict) -> Dict:
+        return self._write_singbox_file(name, "json", json.dumps(config, indent=2, ensure_ascii=False))
+
+    def write_vless_link(self, name: str, link: str) -> Dict:
+        """Stores the link itself: the tunnel config is built from it on every start."""
+        return self._write_singbox_file(name, "vless", link + "\n")
+
     async def repair_symlinks(self) -> Dict:
         """Re-creates missing/broken symlinks for all managed configs."""
         scanned = await self.scan_existing_configs()
         results = []
         for cfg in scanned["managed"]:
+            if cfg["type"] != "awg":
+                continue
             r = self._ensure_symlink(cfg["path"], cfg["system_path"])
             results.append({
                 "name": cfg["name"],
@@ -229,7 +293,7 @@ class ConfigManager:
             sanitized_name = self._sanitize_name(name)
             result["config_name"] = sanitized_name
 
-            local_path = os.path.join(self.config_dir, f"{sanitized_name}.conf")
+            local_path = self.config_path(sanitized_name)
             interface_name = f"{self.config_prefix}{sanitized_name}"
             system_path = os.path.join(self.system_config_dir, f"{interface_name}.conf")
 

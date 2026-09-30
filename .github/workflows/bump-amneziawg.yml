@@ -1,4 +1,4 @@
-name: Bump AmneziaWG
+name: Bump AmneziaWG and sing-box
 
 on:
   schedule:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   bump:
-    name: Check for new amneziawg-go / amneziawg-tools tags
+    name: Check for new amneziawg-go / amneziawg-tools / sing-box tags
     runs-on: ubuntu-latest
 
     steps:
@@ -23,23 +23,28 @@ jobs:
         id: latest
         run: |
           latest_tag() {
-            git ls-remote --tags --refs --sort=-v:refname "https://github.com/amnezia-vpn/$1.git" \
+            git ls-remote --tags --refs --sort=-v:refname "https://github.com/$1.git" \
               | sed 's|.*refs/tags/||' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$' \
+              | grep -E "$2" \
               | head -n1
           }
-          echo "go=$(latest_tag amneziawg-go)" >> "$GITHUB_OUTPUT"
-          echo "tools=$(latest_tag amneziawg-tools)" >> "$GITHUB_OUTPUT"
+          awg_tag='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$'
+          echo "go=$(latest_tag amnezia-vpn/amneziawg-go "$awg_tag")" >> "$GITHUB_OUTPUT"
+          echo "tools=$(latest_tag amnezia-vpn/amneziawg-tools "$awg_tag")" >> "$GITHUB_OUTPUT"
+          # Stable releases only: sing-box also tags alpha, beta and rc builds.
+          echo "singbox=$(latest_tag SagerNet/sing-box '^v[0-9]+\.[0-9]+\.[0-9]+$')" >> "$GITHUB_OUTPUT"
 
       - name: Update Dockerfile
         id: update
         run: |
           go="${{ steps.latest.outputs.go }}"
           tools="${{ steps.latest.outputs.tools }}"
-          [[ -n "$go" && -n "$tools" ]] || { echo "Failed to resolve upstream tags"; exit 1; }
+          singbox="${{ steps.latest.outputs.singbox }}"
+          [[ -n "$go" && -n "$tools" && -n "$singbox" ]] || { echo "Failed to resolve upstream tags"; exit 1; }
           sed -i -E \
             -e "s|^ARG AMNEZIAWG_GO_REF=.*|ARG AMNEZIAWG_GO_REF=${go}|" \
             -e "s|^ARG AMNEZIAWG_TOOLS_REF=.*|ARG AMNEZIAWG_TOOLS_REF=${tools}|" \
+            -e "s|^ARG SING_BOX_REF=.*|ARG SING_BOX_REF=${singbox}|" \
             infra/Dockerfile
           git diff --exit-code infra/Dockerfile && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
 
@@ -49,14 +54,16 @@ jobs:
         uses: peter-evans/create-pull-request@v7
         with:
           branch: bot/bump-amneziawg
-          commit-message: 'infra: bump amneziawg-go to ${{ steps.latest.outputs.go }}, amneziawg-tools to ${{ steps.latest.outputs.tools }}'
-          title: 'infra: bump AmneziaWG (go ${{ steps.latest.outputs.go }}, tools ${{ steps.latest.outputs.tools }})'
+          commit-message: 'infra: bump amneziawg-go to ${{ steps.latest.outputs.go }}, amneziawg-tools to ${{ steps.latest.outputs.tools }}, sing-box to ${{ steps.latest.outputs.singbox }}'
+          title: 'infra: bump AmneziaWG (go ${{ steps.latest.outputs.go }}, tools ${{ steps.latest.outputs.tools }}) and sing-box ${{ steps.latest.outputs.singbox }}'
           body: |
-            New upstream AmneziaWG tags:
+            New upstream tags:
             - amneziawg-go: `${{ steps.latest.outputs.go }}`
             - amneziawg-tools: `${{ steps.latest.outputs.tools }}`
+            - sing-box: `${{ steps.latest.outputs.singbox }}`
 
-            Before merging, check the upstream changelogs and test on a Steam Deck with existing configs (AWG 1/2/3).
+            Before merging, check the upstream changelogs and test on a Steam Deck with existing configs (AWG 1/2/3 and a VLESS link).
+            A new sing-box may drop deprecated config fields or need a newer Go than the `golang` image in infra/Dockerfile.
           delete-branch: true
 
       # PRs opened with GITHUB_TOKEN don't trigger pull_request workflows,

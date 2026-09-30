@@ -4,6 +4,7 @@ ServiceManager - Manages AmneziaWG interface lifecycle via awg-quick
 
 import os
 import subprocess
+import threading
 from datetime import datetime
 
 import decky
@@ -21,6 +22,12 @@ AWG_QUICK_LOG = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "awg-quick.log")
 class ServiceManager:
     def __init__(self, binary_manager):
         self.binary_manager = binary_manager
+        # Serializes awg-quick up/down between RPC handlers and NetworkWatch's worker thread.
+        self.lock = threading.RLock()
+
+    def run_command(self, cmd: list, timeout: int = 10):
+        """Runs a helper command without info logging: (returncode, stdout, stderr)."""
+        return self._run(cmd, timeout=timeout, quiet=True)
 
     def _run(self, cmd: list, timeout: int = 10, quiet: bool = False):
         log = decky.logger.debug if quiet else decky.logger.info
@@ -100,10 +107,11 @@ class ServiceManager:
         if awg_quick_path is None:
             return {"success": False, "interface": interface, "method": None, "error": "awg-quick binary not found"}
 
-        rc, _, stderr = self._run_logged(
-            [awg_quick_path, "up", interface],
-            timeout=START_STOP_TIMEOUT_SEC,
-        )
+        with self.lock:
+            rc, _, stderr = self._run_logged(
+                [awg_quick_path, "up", interface],
+                timeout=START_STOP_TIMEOUT_SEC,
+            )
         if rc == 0:
             decky.logger.info(f"Started {interface} via awg-quick")
             return {"success": True, "interface": interface, "method": "awg-quick", "error": None}
@@ -117,10 +125,11 @@ class ServiceManager:
         if awg_quick_path is None:
             return {"success": False, "interface": interface, "method": None, "error": "awg-quick binary not found"}
 
-        rc, _, stderr = self._run_logged(
-            [awg_quick_path, "down", interface],
-            timeout=START_STOP_TIMEOUT_SEC,
-        )
+        with self.lock:
+            rc, _, stderr = self._run_logged(
+                [awg_quick_path, "down", interface],
+                timeout=START_STOP_TIMEOUT_SEC,
+            )
         if rc == 0:
             decky.logger.info(f"Stopped {interface} via awg-quick")
             return {"success": True, "interface": interface, "method": "awg-quick", "error": None}
@@ -190,12 +199,14 @@ class ServiceManager:
             decky.logger.warning("awg binary not found, cannot list interfaces")
             return []
 
-        rc, stdout, _ = self._run([awg_path, "show", "interfaces"], quiet=True)
-        if rc != 0 or not stdout:
-            return []
+        return [self.get_status(iface) for iface in self.list_interfaces()]
 
-        ifaces = stdout.split()
-        return [self.get_status(iface) for iface in ifaces]
+    def list_interfaces(self) -> list:
+        awg_path = self.binary_manager.get_binary_path("awg")
+        if awg_path is None:
+            return []
+        rc, stdout, _ = self._run([awg_path, "show", "interfaces"], quiet=True)
+        return stdout.split() if rc == 0 and stdout else []
 
     def stop_all_interfaces(self, only_managed: bool = False) -> dict:
         awg_path = self.binary_manager.get_binary_path("awg")

@@ -1,3 +1,15 @@
+FROM golang:1.26 AS sing-box
+
+ARG SING_BOX_REF=v1.14.2
+
+# Upstream release flags with a trimmed tag set: VLESS/REALITY need uTLS, gvisor serves the mixed TUN stack.
+RUN git clone --depth 1 --branch "${SING_BOX_REF}" https://github.com/SagerNet/sing-box.git /tmp/sing-box && \
+    cd /tmp/sing-box && \
+    CGO_ENABLED=0 go build -trimpath \
+        -tags with_gvisor,with_utls,badlinkname,tfogo_checklinkname0 \
+        -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${SING_BOX_REF#v}' $(cat release/LDFLAGS) -s -w -buildid=" \
+        -o /sing-box ./cmd/sing-box
+
 FROM ghcr.io/steamdeckhomebrew/holo-base:latest
 
 RUN pacman -Sy --noconfirm && \
@@ -16,3 +28,5 @@ RUN git clone --depth 1 --branch "${AMNEZIAWG_TOOLS_REF}" https://github.com/amn
 RUN mkdir /binaries && \
     cp /tmp/amneziawg-go/amneziawg-go /binaries/ && \
     cp /tmp/amneziawg-tools/src/wg /binaries/awg
+
+COPY --from=sing-box /sing-box /binaries/sing-box

@@ -59,6 +59,7 @@ cli/decky
 # Binaries
 bin/amneziawg-go
 bin/awg
+bin/sing-box
 bin/*.tar.gz
 bin/*.zip
 binaries

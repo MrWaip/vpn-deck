@@ -20,7 +20,7 @@ class BinaryManager:
         self.binary_cache: Optional[Dict[str, str]] = None
 
         # Binary names we're looking for
-        self.binary_names = ["amneziawg-go", "awg", "awg-quick"]
+        self.binary_names = ["amneziawg-go", "awg", "awg-quick", "sing-box"]
     
     def detect_binaries(self) -> Dict[str, Optional[str]]:
         """
@@ -78,7 +78,7 @@ class BinaryManager:
             return None
 
         try:
-            for flag in ("--version", "-v"):
+            for flag in ("--version", "-v", "version"):
                 result = subprocess.run(
                     [path, flag],
                     capture_output=True,

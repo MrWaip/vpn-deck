@@ -249,8 +249,9 @@ set_config() {
 # Adds /32 (or /128) host routes to peer endpoints via the path the kernel
 # would currently use to reach them — *before* the tunnel hijacks routing.
 # Prevents the "tunnel routes its own underlay" loop that occurs when a
-# split-tunnel AllowedIPs CIDR includes the endpoint's IP. Harmless with
-# AllowedIPs=0.0.0.0/0 (more specific than the suppressed default route).
+# split-tunnel AllowedIPs CIDR includes the endpoint's IP. Skipped for a full
+# tunnel: its own packets carry the fwmark and use the main table's default
+# route, while a pin would keep the old gateway after a network change.
 ENDPOINT_ROUTE_STATE_DIR="/var/run/awg-quick"
 
 _endpoint_route_state_file() {
@@ -258,18 +259,22 @@ _endpoint_route_state_file() {
 }
 
 set_endpoint_direct_route() {
-	local endpoint host proto mask route_info gw dev state_file
+	local endpoint host proto mask any allowed route_info gw dev state_file
 	state_file="$(_endpoint_route_state_file)"
 	mkdir -p "$ENDPOINT_ROUTE_STATE_DIR" 2>/dev/null || return 0
 	: > "$state_file" 2>/dev/null || return 0
+	allowed="$(awg show "$INTERFACE" allowed-ips 2>/dev/null)"
+	allowed=" ${allowed//[$'\t\n']/ } "
 	while read -r _ endpoint; do
 		[[ $endpoint =~ ^\[?([a-z0-9:.]+)\]?:[0-9]+$ ]] || continue
 		host="${BASH_REMATCH[1]}"
 		if [[ $host == *:* ]]; then
-			proto=-6; mask=128
+			proto=-6; mask=128; any="::/0"
 		else
-			proto=-4; mask=32
+			proto=-4; mask=32; any="0.0.0.0/0"
 		fi
+		# Same condition as add_route -> add_default (fwmark policy routing).
+		[[ ( -z $TABLE || $TABLE == auto ) && $allowed == *" $any "* ]] && continue
 		route_info="$(ip $proto route get "$host" 2>/dev/null | head -n1)"
 		[[ -n $route_info ]] || continue
 		# No "via" means on-link route (LAN endpoint) — nothing to bypass.

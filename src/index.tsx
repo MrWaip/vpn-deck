@@ -20,7 +20,7 @@ import {
   openFilePicker,
   toaster,
 } from "@decky/api";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { FaNetworkWired } from "react-icons/fa";
 
 interface VPNError {
@@ -36,12 +36,37 @@ interface ConfigInfo {
   interface: string;
   active: boolean;
   managed_by: string;
+  type: "awg" | "sing-box" | "vless";
+  protocol: string;
 }
 
 interface VPNOpResult {
   success: boolean;
   error: string | null;
   interface: string;
+  switched_from?: string[];
+}
+
+interface TunnelStatus {
+  name: string;
+  interface: string;
+  type: string;
+  address: string | null;
+  handshake_age: number | null;
+  exit_ip: string | null;
+  exit_country: string;
+  rx_bytes: number | null;
+  tx_bytes: number | null;
+  sampled_at: number;
+}
+
+interface TunnelRate {
+  rx: number;
+  tx: number;
+}
+
+interface PluginSettings {
+  restore_on_boot: boolean;
 }
 
 const listConfigsWithStatus = callable<[], ConfigInfo[]>(
@@ -54,6 +79,9 @@ const vpnStopConfig = callable<[{ config_name: string }], VPNOpResult>(
   "vpn_stop_config",
 );
 const getErrors = callable<[], VPNError[]>("get_errors");
+const connectionStatus = callable<[], TunnelStatus[]>("connection_status");
+const getSettings = callable<[], PluginSettings>("get_settings");
+const setRestoreOnBoot = callable<[{ enabled: boolean }], PluginSettings>("set_restore_on_boot");
 const clearErrors = callable<[], boolean>("clear_errors");
 
 interface DeleteConfigResult {
@@ -97,6 +125,41 @@ function formatTimestamp(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString();
 }
 
+function formatRate(bitsPerSecond: number): string {
+  if (bitsPerSecond >= 1e6) {
+    return `${(bitsPerSecond / 1e6).toFixed(bitsPerSecond >= 1e8 ? 0 : 1)} Мбит/с`;
+  }
+  return `${Math.round(bitsPerSecond / 1e3)} Кбит/с`;
+}
+
+function formatAge(seconds: number): string {
+  return seconds < 120 ? `${seconds} с назад` : `${Math.floor(seconds / 60)} мин назад`;
+}
+
+function TunnelStatusLines({ status, rate }: { status: TunnelStatus; rate?: TunnelRate }) {
+  const lines = [
+    status.exit_ip
+      ? `Выход: ${status.exit_ip}${status.exit_country ? ` · ${status.exit_country}` : ""}`
+      : "Выход: проверяю…",
+  ];
+  if (status.address) {
+    lines.push(
+      `Адрес в VPN: ${status.address}` +
+        (status.handshake_age !== null ? ` · рукопожатие ${formatAge(status.handshake_age)}` : ""),
+    );
+  }
+  if (rate) {
+    lines.push(`↓ ${formatRate(rate.rx)} · ↑ ${formatRate(rate.tx)}`);
+  }
+  return (
+    <div style={{ fontSize: "12px", lineHeight: "18px", color: "#8b929a", margin: "2px 0 6px" }}>
+      {lines.map((line) => (
+        <div key={line}>{line}</div>
+      ))}
+    </div>
+  );
+}
+
 function validateConfigName(name: string): { valid: boolean; error?: string } {
   const trimmed = name.trim();
   if (!trimmed) {
@@ -137,13 +200,13 @@ function ImportConfigModal({
         true,
         true,
         undefined,
-        ["conf"],
+        ["conf", "txt", "vpn", "json"],
       );
       const filename =
         res.realpath
           .split("/")
           .pop()
-          ?.replace(/\.conf$/, "") ?? "";
+          ?.replace(/\.(conf|txt|vpn|json)$/, "") ?? "";
       setFilePath(res.realpath);
       setName(filename);
       setStatus(res.realpath.split("/").pop() ?? "");
@@ -194,8 +257,13 @@ function ImportConfigModal({
       <DialogHeader>Импорт конфига</DialogHeader>
       <DialogBody>
         <DialogButton onClick={handlePickFile} disabled={loading}>
-          {filePath ? "Выбрать другой файл" : "Выбрать файл .conf"}
+          {filePath ? "Выбрать другой файл" : "Выбрать файл"}
         </DialogButton>
+        {!filePath && (
+          <div style={{ marginTop: "8px", fontSize: "12px", color: "#8b929a" }}>
+            Подходит конфиг AmneziaWG или WireGuard (.conf), ссылка vpn:// из AmneziaVPN, ссылка vless:// или конфиг sing-box (.json). Ссылку положи в файл .txt
+          </div>
+        )}
         {filePath && (
           <div style={{ marginTop: "12px" }}>
             <TextField
@@ -285,6 +353,36 @@ function Content() {
   const [probes, setProbes] = useState<DiagnosticsProbe[] | null>(null);
   const [probesLoading, setProbesLoading] = useState<boolean>(false);
   const [repairLoading, setRepairLoading] = useState<boolean>(false);
+  const [statuses, setStatuses] = useState<Record<string, TunnelStatus>>({});
+  const [rates, setRates] = useState<Record<string, TunnelRate>>({});
+  const [settings, setSettings] = useState<PluginSettings | null>(null);
+  const lastSamples = useRef<Record<string, TunnelStatus>>({});
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const result = await connectionStatus();
+      const byInterface: Record<string, TunnelStatus> = {};
+      const nextRates: Record<string, TunnelRate> = {};
+      for (const st of result) {
+        byInterface[st.interface] = st;
+        const prev = lastSamples.current[st.interface];
+        const dt = prev ? st.sampled_at - prev.sampled_at : 0;
+        if (prev && dt > 0 && st.rx_bytes !== null && st.tx_bytes !== null
+            && prev.rx_bytes !== null && prev.tx_bytes !== null
+            && st.rx_bytes >= prev.rx_bytes && st.tx_bytes >= prev.tx_bytes) {
+          nextRates[st.interface] = {
+            rx: ((st.rx_bytes - prev.rx_bytes) * 8) / dt,
+            tx: ((st.tx_bytes - prev.tx_bytes) * 8) / dt,
+          };
+        }
+      }
+      lastSamples.current = byInterface;
+      setStatuses(byInterface);
+      setRates(nextRates);
+    } catch (error) {
+      console.error("Failed to refresh connection status:", error);
+    }
+  }, []);
 
   const refreshConfigs = useCallback(async () => {
     try {
@@ -312,12 +410,18 @@ function Content() {
           ? await vpnStartConfig({ config_name: configName })
           : await vpnStopConfig({ config_name: configName });
 
+        const switched = result.switched_from ?? [];
         if (!result.success) {
           toaster.toast({
             title: "Ошибка",
             body: result.error ?? "Неизвестная ошибка",
           });
           await loadErrors();
+        } else if (enabled && switched.length > 0) {
+          toaster.toast({
+            title: "VPN переключён",
+            body: `${switched.join(", ")} → ${configName}`,
+          });
         } else {
           toaster.toast({
             title: enabled ? "VPN включён" : "VPN выключен",
@@ -333,10 +437,19 @@ function Content() {
       } finally {
         setLoadingMap((prev) => ({ ...prev, [configName]: false }));
         await refreshConfigs();
+        await refreshStatus();
       }
     },
-    [refreshConfigs, loadErrors],
+    [refreshConfigs, refreshStatus, loadErrors],
   );
+
+  const handleRestoreOnBoot = useCallback(async (enabled: boolean) => {
+    try {
+      setSettings(await setRestoreOnBoot({ enabled }));
+    } catch (e) {
+      toaster.toast({ title: "Ошибка", body: String(e) });
+    }
+  }, []);
 
   const handleDiagnose = useCallback(async () => {
     setProbesLoading(true);
@@ -383,16 +496,20 @@ function Content() {
 
   useEffect(() => {
     refreshConfigs();
+    refreshStatus();
     loadErrors();
+    getSettings().then(setSettings).catch((e) => console.error("Failed to load settings:", e));
 
     const configsInterval = setInterval(refreshConfigs, 3000);
+    const statusInterval = setInterval(refreshStatus, 3000);
     const errorsInterval = setInterval(loadErrors, 10000);
 
     return () => {
       clearInterval(configsInterval);
+      clearInterval(statusInterval);
       clearInterval(errorsInterval);
     };
-  }, [refreshConfigs, loadErrors]);
+  }, [refreshConfigs, refreshStatus, loadErrors]);
 
   return (
     <>
@@ -408,11 +525,17 @@ function Content() {
           <PanelSectionRow key={cfg.interface}>
             <ToggleField
               label={cfg.name}
-              description={cfg.interface}
+              description={`${cfg.protocol} · ${cfg.interface}`}
               checked={cfg.active}
               disabled={!!loadingMap[cfg.name]}
               onChange={(val) => handleToggle(cfg.name, val)}
             />
+            {cfg.active && statuses[cfg.interface] && (
+              <TunnelStatusLines
+                status={statuses[cfg.interface]}
+                rate={rates[cfg.interface]}
+              />
+            )}
             <div style={{ marginTop: "4px" }}>
               <ButtonItem
                 layout="below"
@@ -439,6 +562,18 @@ function Content() {
           >
             Импортировать конфиг
           </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Настройки">
+        <PanelSectionRow>
+          <ToggleField
+            label="Включать VPN после перезагрузки"
+            description="Если VPN был включён при выключении Deck, плагин поднимет его снова"
+            checked={settings?.restore_on_boot ?? true}
+            disabled={settings === null}
+            onChange={handleRestoreOnBoot}
+          />
         </PanelSectionRow>
       </PanelSection>
 
