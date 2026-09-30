@@ -4,7 +4,10 @@ import time
 import traceback as _traceback
 from typing import Dict, List, Optional
 
-from vpn_deck import BinaryManager, ConfigManager, Diagnostics, ServiceManager
+from vpn_deck import (
+    BinaryManager, ConfigManager, Diagnostics, NetworkWatch, ServiceManager,
+    VpnUriError, decode_vpn_uri, is_vpn_uri, looks_like_wg_config,
+)
 
 import decky
 
@@ -41,6 +44,9 @@ class Plugin:
         # Initialize Diagnostics
         self.diagnostics = Diagnostics()
 
+        # Initialize NetworkWatch
+        self.network_watch = NetworkWatch(self.service_manager, self._add_error)
+
     def _add_error(self, operation: str, error_type: str, message: str, details: dict = None):
         """Добавляет ошибку в историю"""
         error = {
@@ -66,12 +72,13 @@ class Plugin:
                 )
         except Exception as e:
             decky.logger.error(f"Symlink auto-repair failed: {e}")
+        self.network_watch.start()
 
     # Function called first during the unload process, utilize this to handle your plugin being stopped, but not
     # completely removed
     async def _unload(self):
         decky.logger.info("VPN Deck plugin unloading")
-        pass
+        await self.network_watch.stop()
 
     # Function called after `_unload` during uninstall, utilize this to clean up processes and other remnants of your
     # plugin that may remain on the system
@@ -87,7 +94,9 @@ class Plugin:
     @_rpc
     async def vpn_stop_all(self, only_managed: bool = False) -> dict:
         """Останавливает все (или только managed) VPN интерфейсы"""
-        return self.service_manager.stop_all_interfaces(only_managed)
+        with self.service_manager.lock:
+            self.network_watch.forget()
+            return self.service_manager.stop_all_interfaces(only_managed)
 
     @_rpc
     async def list_configs_with_status(self) -> list:
@@ -108,7 +117,9 @@ class Plugin:
         if not config_name:
             return {"success": False, "error": "config_name is required", "interface": ""}
         interface = self.config_manager.get_interface_name(config_name)
-        result = self.service_manager.start_interface(interface)
+        with self.service_manager.lock:
+            self.network_watch.forget(interface)
+            result = self.service_manager.start_interface(interface)
         if not result["success"]:
             self._add_error("start", "ServiceError", result["error"] or "unknown", {"interface": interface})
         return {"success": result["success"], "error": result["error"], "interface": interface}
@@ -120,7 +131,9 @@ class Plugin:
         if not config_name:
             return {"success": False, "error": "config_name is required", "interface": ""}
         interface = self.config_manager.get_interface_name(config_name)
-        result = self.service_manager.stop_interface(interface)
+        with self.service_manager.lock:
+            self.network_watch.forget(interface)
+            result = self.service_manager.stop_interface(interface)
         if not result["success"]:
             self._add_error("stop", "ServiceError", result["error"] or "unknown", {"interface": interface})
         return {"success": result["success"], "error": result["error"], "interface": interface}
@@ -201,12 +214,27 @@ class Plugin:
         decky.logger.info(f"import_vpn_config: name={name}, path={path}")
         if not os.path.isfile(path):
             return {"success": False, "error": "Файл не найден"}
+        if os.path.getsize(path) > 1024 * 1024:
+            return {"success": False, "error": "Файл больше 1 МБ, это не похоже на конфиг"}
 
-        with open(path, "r") as f:
-            content = f.read()
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            return {"success": False, "error": "Файл не текстовый"}
 
         if not content.strip():
             return {"success": False, "error": "Файл пустой"}
+
+        if is_vpn_uri(content):
+            try:
+                content = decode_vpn_uri(content)
+            except VpnUriError as e:
+                return {"success": False, "error": f"Не удалось разобрать ссылку vpn://: {e}"}
+            decky.logger.info("import_vpn_config: decoded vpn:// link")
+
+        if not looks_like_wg_config(content):
+            return {"success": False, "error": "Файл не похож на конфиг AmneziaWG/WireGuard или ссылку vpn://"}
 
         result = self.config_manager.write_config(name, content)
         return {"success": result["success"], "error": result["error"] or ""}
@@ -228,7 +256,9 @@ class Plugin:
         if not name:
             return {"success": False, "config_name": None, "error": "name is required"}
         interface = self.config_manager.get_interface_name(name)
-        stop_result = self.service_manager.stop_interface(interface)
+        with self.service_manager.lock:
+            self.network_watch.forget(interface)
+            stop_result = self.service_manager.stop_interface(interface)
         if not stop_result["success"] and stop_result.get("error") != "awg-quick binary not found":
             decky.logger.warning(f"Stop before delete failed (continuing): {stop_result.get('error')}")
         result = await self.config_manager.delete_config(name)

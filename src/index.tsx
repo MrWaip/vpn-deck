@@ -137,13 +137,13 @@ function ImportConfigModal({
         true,
         true,
         undefined,
-        ["conf"],
+        ["conf", "txt", "vpn"],
       );
       const filename =
         res.realpath
           .split("/")
           .pop()
-          ?.replace(/\.conf$/, "") ?? "";
+          ?.replace(/\.(conf|txt|vpn)$/, "") ?? "";
       setFilePath(res.realpath);
       setName(filename);
       setStatus(res.realpath.split("/").pop() ?? "");
@@ -194,8 +194,13 @@ function ImportConfigModal({
       <DialogHeader>Импорт конфига</DialogHeader>
       <DialogBody>
         <DialogButton onClick={handlePickFile} disabled={loading}>
-          {filePath ? "Выбрать другой файл" : "Выбрать файл .conf"}
+          {filePath ? "Выбрать другой файл" : "Выбрать файл"}
         </DialogButton>
+        {!filePath && (
+          <div style={{ marginTop: "8px", fontSize: "12px", color: "#8b929a" }}>
+            Подходит конфиг AmneziaWG или WireGuard (.conf) или ссылка vpn:// из AmneziaVPN в файле .vpn, .txt или .conf
+          </div>
+        )}
         {filePath && (
           <div style={{ marginTop: "12px" }}>
             <TextField

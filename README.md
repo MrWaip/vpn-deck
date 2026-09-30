@@ -20,6 +20,7 @@ This plugin was developed purely out of enthusiasm, in spare time. If you encoun
 - Multiple configs — store and switch between multiple VPN connections
 - Enable/disable each config with a single toggle
 - Real-time connection status
+- The tunnel survives sleep and network changes: the plugin re-pins the route to the VPN server through the new network and restarts a stuck tunnel
 - Error history with the ability to clear it
 
 The plugin requires root access to work with `awg-quick` and network interfaces.
@@ -46,6 +47,8 @@ Install the plugin **only from official releases** on GitHub.
 
 > [!IMPORTANT]
 > The config must be in **AmneziaWG native format** (a WireGuard-like `.conf` file with `Jc`, `Jmin`, `Jmax`, etc. fields). In the AmneziaVPN app, make sure to select **"AmneziaWG native format"** when exporting — it is not the default.
+>
+> Instead of a `.conf` file you can import a `vpn://…` link from AmneziaVPN: open the "Share VPN Access" screen → "Connection", pick the AmneziaWG or WireGuard protocol, keep "Connection format" at "For the AmneziaVPN app" (the default) → "Share" → "Copy". Paste the link into a `.conf` or `.txt` file as is (line breaks inside it are fine), or use the `amnezia_config.vpn` file the app saves via "Share", and pick that file in the plugin. The plugin extracts the AmneziaWG or WireGuard config from it.
 
 **Before removing the plugin or installing a new version, turn off VPN in the plugin itself** (set the toggle next to the active config to "off"). Otherwise, the update or removal may fail.
 
