@@ -3,7 +3,7 @@
 # the plugin needs (TUN stack, uTLS/REALITY, QUIC-based protocols).
 FROM golang:1.25-bookworm AS singbox
 
-ARG SINGBOX_REF=v1.14.3
+ARG SINGBOX_REF=v1.14.4
 ARG SINGBOX_TAGS=with_gvisor,with_quic,with_utls,badlinkname,tfogo_checklinkname0
 
 RUN git clone --depth 1 --branch "${SINGBOX_REF}" https://github.com/SagerNet/sing-box.git /src/sing-box
