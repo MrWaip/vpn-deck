@@ -3,7 +3,7 @@
 # the plugin needs (TUN stack, uTLS/REALITY, QUIC-based protocols).
 FROM golang:1.25-bookworm AS singbox
 
-ARG SINGBOX_REF=v1.14.3
+ARG SINGBOX_REF=v1.14.4
 ARG SINGBOX_TAGS=with_gvisor,with_quic,with_utls,badlinkname,tfogo_checklinkname0
 
 RUN git clone --depth 1 --branch "${SINGBOX_REF}" https://github.com/SagerNet/sing-box.git /src/sing-box
@@ -18,7 +18,7 @@ RUN pacman -Sy --noconfirm && \
     pacman -S --noconfirm go git base-devel libmnl && \
     pacman -Scc --noconfirm
 
-ARG AMNEZIAWG_GO_REF=v3.1.20260828
+ARG AMNEZIAWG_GO_REF=v3.1.20261116
 ARG AMNEZIAWG_TOOLS_REF=v3.1.20260812
 
 RUN git clone --depth 1 --branch "${AMNEZIAWG_GO_REF}" https://github.com/amnezia-vpn/amneziawg-go.git /tmp/amneziawg-go && \
